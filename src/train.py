@@ -51,7 +51,7 @@ def setup():
 
     # Load parameters
     params = load_yaml(args.params)
-    if params.get('is_accompaniment') and params.get('condition_track_idx') is None:
+    if params['is_accompaniment'] and params['condition_track_idx'] is None:
         raise TypeError("`condition_track_idx` cannot be None type in "
                         "accompaniment mode.")
 
@@ -130,7 +130,7 @@ def load_or_create_samples(params, config):
         make_sure_path_exists(config['model_dir'])
         np.save(sample_z_path, sample_z)
 
-    if params.get('is_accompaniment'):
+    if params['is_accompaniment']:
         # Load sample_x
         LOGGER.info("Loading sample_x.")
         sample_x_path = os.path.join(config['model_dir'], 'sample_x.npy')
@@ -160,6 +160,8 @@ def load_or_create_samples(params, config):
     return sample_x, None, sample_z
 
 def main():
+
+
     """Main function."""
     # Setup
     logging.basicConfig(level=LOGLEVEL, format=LOG_FORMAT)
@@ -167,14 +169,17 @@ def main():
     LOGGER.info("Using parameters:\n%s", pformat(params))
     LOGGER.info("Using configurations:\n%s", pformat(config))
 
+
     # ================================== Data ==================================
     # Load training data
     train_x, _ = load_training_data(params, config)
+    eval_x, _ = load_training_data(params, config) # must change to EVAL! Only for temp use! 
 
     # ================================= Model ==================================
     # Build model
     model = Model(params)
-    if params.get('is_accompaniment'):
+
+    if params['is_accompaniment']:
         train_c = tf.expand_dims(
             train_x[..., params['condition_track_idx']], -1)
         train_nodes = model(
@@ -182,6 +187,7 @@ def main():
     else:
         train_nodes = model(
             x=train_x, mode='train', params=params, config=config)
+
 
     # Log number of parameters in the model
     def get_n_params(var_list):
@@ -195,6 +201,74 @@ def main():
         LOGGER.info("Number of trainable parameters in {}: {:,}".format(
             component.name, get_n_params(tf.trainable_variables(
                 model.name + '/' + component.name))))
+
+    # musegan.train        INFO     Number of trainable parameters in Model: 3,943,968
+    # musegan.train        INFO     Number of trainable parameters in Generator: 2,578,127
+    # musegan.train        INFO     Number of trainable parameters in Discriminator: 1,365,841
+
+    # ================================== MAML front line ==================================
+    # for t_var in tf.trainable_variables(model.name):
+    #     print("name", t_var.name, "t_var", t_var )
+    weights_list = tf.trainable_variables(model.name)
+    var_name_list = [x.name for x in weights_list]
+    # Create a zip object from two lists
+    zipbObj = zip(var_name_list, weights_list)
+    # Create a dictionary from zip object
+    weights = dict(zipbObj)
+    
+    # load MAML here 
+    # from maml.main import main2
+    # main2()
+    from maml.MuseGAN_maml import MAML
+
+    test_num_updates = 5
+    maml_model = MAML(test_num_updates=test_num_updates,
+                    inner_model=model, config=config, params=params)
+
+    # eval_x = train_x # dummy assignment
+    
+    input_tensors = {
+        'inputa':train_x,
+        'inputb':eval_x,
+        'labela':train_x,
+        'labelb':eval_x,
+    }
+
+    with tf.variable_scope(model.name, reuse=False) as scope:
+        ret = model.gen.forward_with_given_weights(weights=weights, 
+                    tensor_in=tf.truncated_normal((
+                    config['batch_size'], params['latent_dim'])), 
+                    condition=None, training=True)
+        print("compare ret, train_x",train_x, "ret",ret)
+        model.dis.forward_with_given_weights(weights=weights, tensor_in=train_x, condition=None, training=True)
+        model.dis.forward_with_given_weights(weights=weights, tensor_in=ret, condition=None, training=True)
+    
+    print("============== after testing")
+    maml_model.construct_model(weights=weights, input_tensors=input_tensors) # should be train_x stuff  
+
+    exit(0) # ends here. 
+
+    # for w in weights.keys(): 
+    #     print(w)
+
+    # ################# 
+    # TODO: feed data. implement the dataflow. but not that simple. Need to combine MuseGAN's way. 
+    # (tensorflow dataset + sampler + summary + alternative update of generators and discriminators)
+    # input_tensors = [model.pretrain_op]
+    # input_tensors = [model.metatrain_op]
+    # feed_dict = {model.inputa: inputa, model.inputb: inputb,  model.labela: labela, model.labelb: labelb, model.meta_lr: 0.0}
+    # result = sess.run(input_tensors, feed_dict)
+
+
+    # REF!
+    # if FLAGS.train or not tf_data_load:
+    #     model.construct_model(input_tensors=input_tensors, prefix='metatrain_')
+    # if tf_data_load:
+    #     model.construct_model(input_tensors=metaval_input_tensors, prefix='metaval_')
+    
+
+
+    # ================================== MAML end line ==================================
 
     # ================================ Sampler =================================
     if config['save_samples_steps'] > 0:
@@ -215,7 +289,7 @@ def main():
         # Get prediction nodes
         placeholder_z = tf.placeholder(tf.float32, shape=sample_z.shape)
         placeholder_y = None
-        if params.get('is_accompaniment'):
+        if params['is_accompaniment']:
             c_shape = np.append(sample_x.shape[:-1], 1)
             placeholder_c = tf.placeholder(tf.float32, shape=c_shape)
             predict_nodes = model(
@@ -281,6 +355,9 @@ def main():
 
         # Training iteration
         while step < config['steps']:
+            
+            ######## WX: Core Traing part begin: MAML would take over here 
+            # 
 
             # Train the discriminator
             if step < 10:
@@ -316,7 +393,7 @@ def main():
                     and (step % config['save_samples_steps'] == 0)):
                 LOGGER.info("Running sampler")
                 feed_dict_sampler = {placeholder_z: sample_z}
-                if params.get('is_accompaniment'):
+                if params['is_accompaniment']:
                     feed_dict_sampler[placeholder_c] = np.expand_dims(
                         sample_x[..., params['condition_track_idx']], -1)
                 if step < 3000:
@@ -332,7 +409,7 @@ def main():
                 feed_dict_evaluation = {
                     placeholder_z: scipy.stats.truncnorm.rvs(-2, 2, size=(
                         np.prod(config['sample_grid']), params['latent_dim']))}
-                if params.get('is_accompaniment'):
+                if params['is_accompaniment']:
                     feed_dict_evaluation[placeholder_c] = np.expand_dims(
                         sample_x[..., params['condition_track_idx']], -1)
                 sess.run(save_metrics_op, feed_dict=feed_dict_evaluation)

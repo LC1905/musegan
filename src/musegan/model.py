@@ -34,10 +34,10 @@ class Model:
 
             # Build the model graph
             LOGGER.info("Building model.")
-            if params.get('is_accompaniment'):
+            if params['is_accompaniment']:
                 self.gen = load_component(
                     'generator', params['nets']['generator'], 'Generator')(
-                        n_tracks=params['data_shape'][-1] - 1,
+                        n_trasecks=params['data_shape'][-1] - 1,
                         condition_track_idx=params['condition_track_idx'])
             else:
                 self.gen = load_component(
@@ -65,6 +65,153 @@ class Model:
         raise ValueError("Unrecognized mode received. Expect 'train' or "
                          "'predict' but get {}".format(mode))
 
+    def get_generator_loss_with_weights_input(self, x, weights, z=None, y=None, c=None, params=None,
+                        config=None):
+        """ Must use the weights to forward """
+        """Return a dictionary of graph nodes for training."""
+        LOGGER.info("Building training nodes.")
+        with tf.variable_scope(self.name, reuse=tf.AUTO_REUSE) as scope:
+
+            nodes = {}
+
+            # Get or create global step
+            global_step = tf.train.get_or_create_global_step()
+            nodes['gen_step'] = tf.get_variable(
+                'gen_step', [], tf.int32, tf.constant_initializer(0),
+                trainable=False)
+
+            # Set default latent distribution if not given
+            if z is None:
+                nodes['z'] = tf.truncated_normal((
+                    config['batch_size'], params['latent_dim']))
+                    # batch_size: 64, latent_dim:128 
+            else:
+                nodes['z'] = z
+
+            # Get slope tensor (for straight-through estimators)
+            nodes['slope'] = tf.get_variable(
+                'slope', [], tf.float32, tf.constant_initializer(1.0),
+                trainable=False)
+
+            # --- Generator output ---------------------------------------------
+            if params['use_binary_neurons']:
+                if params['is_accompaniment']:
+                    
+                    # nodes['fake_x'], nodes['fake_x_preactivated'] = self.gen(
+                    #     nodes['z'], y, c, True, nodes['slope'])
+
+                    """ Here, the **true magic** is the forwarding with weights"""
+                    
+                    nodes['fake_x'], nodes['fake_x_preactivated'] = \
+                        self.gen.forward_with_given_weights(
+                            weights, nodes['z'], y, c, 
+                            True, nodes['slope'])
+                else:
+                    # nodes['fake_x'], nodes['fake_x_preactivated'] = self.gen(
+                    #     nodes['z'], y, True, nodes['slope'])
+                    nodes['fake_x'], nodes['fake_x_preactivated'] = \
+                        self.gen.forward_with_given_weights(
+                            weights, nodes['z'], y, True, nodes['slope'])
+            else:
+                if params['is_accompaniment']:
+                    nodes['fake_x'] = self.gen.forward_with_given_weights(weights, nodes['z'], y, c, True)
+                else:
+                    nodes['fake_x'] = self.gen.forward_with_given_weights(weights, nodes['z'], y, True)
+
+            # --- Slope annealing ----------------------------------------------
+            if config['use_slope_annealing']:
+                slope_schedule = config['slope_schedule']
+                scheduled_slope = get_scheduled_variable(
+                    1.0, slope_schedule['end_value'], slope_schedule['start'],
+                    slope_schedule['end'])
+                tf.add_to_collection(
+                    tf.GraphKeys.UPDATE_OPS,
+                    tf.assign(nodes['slope'], scheduled_slope))
+
+            # --- Discriminator output -----------------------------------------
+            nodes['dis_real'] = self.dis.forward_with_given_weights(weights, x, y, True)
+            nodes['dis_fake'] = self.dis.forward_with_given_weights(weights, nodes['fake_x'], y, True)
+
+            # ============================= Losses =============================
+            LOGGER.info("Building losses.")
+            # --- Adversarial losses -------------------------------------------
+            nodes['gen_loss'], nodes['dis_loss'] = get_adv_losses(
+                nodes['dis_real'], nodes['dis_fake'], config['gan_loss_type'])
+
+            # --- Gradient penalties -------------------------------------------
+            if config['use_gradient_penalties']:
+                eps_x = tf.random_uniform(
+                    [config['batch_size']] + [1] * len(params['data_shape']))
+                inter_x = eps_x * x + (1.0 - eps_x) * nodes['fake_x']
+                dis_x_inter_out = self.dis(inter_x, y, True)
+                gradient_x = tf.gradients(dis_x_inter_out, inter_x)[0]
+                slopes_x = tf.sqrt(1e-8 + tf.reduce_sum(
+                    tf.square(gradient_x),
+                    np.arange(1, gradient_x.get_shape().ndims)))
+                gradient_penalty_x = tf.reduce_mean(tf.square(slopes_x - 1.0))
+                nodes['dis_loss'] += 10.0 * gradient_penalty_x
+
+            # Compute total loss (for logging and detecting NAN values only)
+            nodes['loss'] = nodes['gen_loss'] + nodes['dis_loss']
+
+            # # ========================== Training ops ==========================
+            # LOGGER.info("Building training ops.")
+            # # --- Learning rate decay ------------------------------------------
+            # nodes['learning_rate'] = tf.get_variable(
+            #     'learning_rate', [], tf.float32,
+            #     tf.constant_initializer(config['initial_learning_rate']),
+            #     trainable=False)
+            # if config['use_learning_rate_decay']:
+            #     scheduled_learning_rate = get_scheduled_variable(
+            #         config['initial_learning_rate'],
+            #         config['learning_rate_schedule']['end_value'],
+            #         config['learning_rate_schedule']['start'],
+            #         config['learning_rate_schedule']['end'])
+            #     tf.add_to_collection(
+            #         tf.GraphKeys.UPDATE_OPS,
+            #         tf.assign(nodes['learning_rate'], scheduled_learning_rate))
+
+            # # --- Optimizers ---------------------------------------------------
+            # # WX: no optimizers allowed?. MAML is in charge. 
+            # gen_opt = tf.train.AdamOptimizer(
+            #     nodes['learning_rate'], config['adam']['beta1'],
+            #     config['adam']['beta2'])
+            # dis_opt = tf.train.AdamOptimizer(
+            #     nodes['learning_rate'], config['adam']['beta1'],
+            #     config['adam']['beta2'])
+
+            # # --- Training ops -------------------------------------------------
+            # nodes['train_ops'] = {}
+            # # Training op for the discriminator
+            # nodes['train_ops']['dis'] = dis_opt.minimize(
+            #     nodes['dis_loss'], global_step,
+            #     tf.trainable_variables(scope.name + '/' + self.dis.name))
+
+            # # Training ops for the generator
+            # update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+            # gen_step_increment = tf.assign_add(nodes['gen_step'], 1)
+            # with tf.control_dependencies(update_ops + [gen_step_increment]):
+            #     nodes['train_ops']['gen'] = gen_opt.minimize(
+            #         nodes['gen_loss'], global_step,
+            #         tf.trainable_variables(scope.name + '/' + self.gen.name))
+
+            # # =========================== Summaries ============================
+            # LOGGER.info("Building summaries.")
+            # if config['save_summaries_steps'] > 0:
+            #     with tf.name_scope('losses'):
+            #         tf.summary.scalar('gen_loss', nodes['gen_loss'])
+            #         tf.summary.scalar('dis_loss', nodes['dis_loss'])
+            #     if config['use_learning_rate_decay']:
+            #         with tf.name_scope('learning_rate_decay'):
+            #             tf.summary.scalar(
+            #                 'learning_rate', nodes['learning_rate'])
+            #     if config['use_slope_annealing']:
+            #         with tf.name_scope('slope_annealing'):
+            #             tf.summary.scalar('slope', nodes['slope'])
+
+        return nodes
+
+
     def get_train_nodes(self, x, z=None, y=None, c=None, params=None,
                         config=None):
         """Return a dictionary of graph nodes for training."""
@@ -83,6 +230,7 @@ class Model:
             if z is None:
                 nodes['z'] = tf.truncated_normal((
                     config['batch_size'], params['latent_dim']))
+                    # batch_size: 64, latent_dim:128 
             else:
                 nodes['z'] = z
 
@@ -93,14 +241,14 @@ class Model:
 
             # --- Generator output ---------------------------------------------
             if params['use_binary_neurons']:
-                if params.get('is_accompaniment'):
+                if params['is_accompaniment']:
                     nodes['fake_x'], nodes['fake_x_preactivated'] = self.gen(
                         nodes['z'], y, c, True, nodes['slope'])
                 else:
                     nodes['fake_x'], nodes['fake_x_preactivated'] = self.gen(
                         nodes['z'], y, True, nodes['slope'])
             else:
-                if params.get('is_accompaniment'):
+                if params['is_accompaniment']:
                     nodes['fake_x'] = self.gen(nodes['z'], y, c, True)
                 else:
                     nodes['fake_x'] = self.gen(nodes['z'], y, True)
@@ -212,14 +360,14 @@ class Model:
 
             # --- Generator output ---------------------------------------------
             if params['use_binary_neurons']:
-                if params.get('is_accompaniment'):
+                if params['is_accompaniment']:
                     nodes['fake_x'], nodes['fake_x_preactivated'] = self.gen(
                         nodes['z'], y, c, False, nodes['slope'])
                 else:
                     nodes['fake_x'], nodes['fake_x_preactivated'] = self.gen(
                         nodes['z'], y, False, nodes['slope'])
             else:
-                if params.get('is_accompaniment'):
+                if params['is_accompaniment']:
                     nodes['fake_x'] = self.gen(nodes['z'], y, c, False)
                 else:
                     nodes['fake_x'] = self.gen(nodes['z'], y, False)

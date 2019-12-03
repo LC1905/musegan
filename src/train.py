@@ -12,6 +12,7 @@ from musegan.metrics import get_save_metric_ops
 from musegan.model import Model
 from musegan.utils import make_sure_path_exists, load_yaml
 from musegan.utils import backup_src, update_not_none, setup_loggers
+from experimental import process_maml_data
 LOGGER = logging.getLogger("musegan.train")
 
 def parse_arguments():
@@ -102,6 +103,7 @@ def load_training_data(params, config):
     if params['is_conditional']:
         train_x, train_y = dataset.make_one_shot_iterator().get_next()
     else:
+        # TODO: This method is about to be deprecated.
         train_x, train_y = dataset.make_one_shot_iterator().get_next(), None
 
     return train_x, train_y
@@ -172,11 +174,14 @@ def main():
 
     # ================================== Data ==================================
     # Load training data
-    train_x, _ = load_training_data(params, config)
-    eval_x, _ = load_training_data(params, config) # must change to EVAL! Only for temp use! 
-
+    # train_x, _ = load_training_data(params, config)
+    # eval_x, _ = load_training_data(params, config) # must change to EVAL! Only for temp use! 
+    
+    # MAML-format data
+    train_x, eval_x = process_maml_data()
+    
     # ================================= Model ==================================
-    # Build model
+    # Build MuseGAN model
     model = Model(params)
 
     if params['is_accompaniment']:
@@ -207,26 +212,23 @@ def main():
     # musegan.train        INFO     Number of trainable parameters in Discriminator: 1,365,841
 
     # ================================== MAML front line ==================================
-    # for t_var in tf.trainable_variables(model.name):
-    #     print("name", t_var.name, "t_var", t_var )
+    from maml.MuseGAN_maml import MAML
+    
     weights_list = tf.trainable_variables(model.name)
     var_name_list = [x.name for x in weights_list]
+    
     # Create a zip object from two lists
     zipbObj = zip(var_name_list, weights_list)
     # Create a dictionary from zip object
     weights = dict(zipbObj)
     
-    # load MAML here 
-    # from maml.main import main2
-    # main2()
-    from maml.MuseGAN_maml import MAML
 
     test_num_updates = 5
+    
+    # Build MAML model.
     maml_model = MAML(test_num_updates=test_num_updates,
                     inner_model=model, config=config, params=params)
 
-    # eval_x = train_x # dummy assignment
-    
     input_tensors = {
         'inputa':train_x,
         'inputb':eval_x,
@@ -234,6 +236,7 @@ def main():
         'labelb':eval_x,
     }
 
+    # Test?
     with tf.variable_scope(model.name, reuse=False) as scope:
         ret = model.gen.forward_with_given_weights(weights=weights, 
                     tensor_in=tf.truncated_normal((
@@ -244,6 +247,7 @@ def main():
         model.dis.forward_with_given_weights(weights=weights, tensor_in=ret, condition=None, training=True)
     
     print("============== after testing")
+    
     maml_model.construct_model(weights=weights, input_tensors=input_tensors) # should be train_x stuff  
 
     exit(0) # ends here. 

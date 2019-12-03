@@ -59,7 +59,6 @@ class MAML:
             self.labela = input_tensors['labela']
             self.labelb = input_tensors['labelb']
         ##############################################################################################
-
         
         # with tf.variable_scope('model', reuse=None) as training_scope:
         for _ in range(1):# dummy, only for creating indentation

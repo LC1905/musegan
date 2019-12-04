@@ -378,8 +378,10 @@ def main():
     """
     tensor_logger = {
         'step': train_nodes['gen_step'],
-        'gen_loss_train': maml_model.total_loss1,
-        'gen_loss_val': maml_model.total_losses2[-1]
+        'gen_loss_1': maml_model.generator_loss_1,
+        'gen_losses_2': maml_model.generator_losses_2[-1],
+        'dis_loss_1': maml_model.discriminator_loss_1,
+        'dis_losses_2': maml_model.discriminator_losses_2[-1]
     }
     step_logger = open(os.path.join(config['log_dir'], 'step.log'), 'w')
     # ======================= Monitored Training Session =======================
@@ -427,7 +429,9 @@ def main():
                     sess.run(train_nodes['train_ops']['dis'])
                 """
                 # Meta train the generator.
-                operations = [maml_model.metatrain_op]
+                # operations = [maml_model.metatrain_op]
+                print('construct operations')
+                operations = [maml_model.gen_metatrain_op, maml_model.dis_metatrain_op]
                 # result = sess.run(operations)
             
                 # Train the generator
@@ -440,7 +444,7 @@ def main():
                         train_nodes['gen_step'], train_nodes['train_ops']['gen'],
                         tensor_logger])
                     """ 
-                    _, _, tensor_logger_values = sess.run([train_nodes['gen_step']] + operations + [tensor_logger])
+                    _, _, _, tensor_logger_values = sess.run([train_nodes['gen_step']] + operations + [tensor_logger])
                     # Logger
                     if config['log_loss_steps'] > 0:
                         LOGGER.info("step={}, {}".format(
@@ -452,13 +456,17 @@ def main():
                     step_logger.write("{}, {: 10.6E}, {: 10.6E}\n".format(
                         #tensor_logger_values['step'],
                         step,
-                        tensor_logger_values['gen_loss_train'],
-                        tensor_logger_values['gen_loss_val']))
+                        tensor_logger_values['gen_loss_1'],
+                        tensor_logger_values['gen_losses_2'],
+                        tensor_logger_values['dis_loss_1'],
+                        tensor_logger_values['dis_losses_2']))
                 else:
-                    _, _ = sess.run([train_nodes['gen_step']] + operations)
+                    print('sess run')
+                    sess.run([train_nodes['gen_step']] + operations)
                     # step, _ = sess.run([
                         # train_nodes['gen_step'], train_nodes['train_ops']['gen']])
 
+                print('run sampler')
                 # Run sampler
                 if ((config['save_samples_steps'] > 0)
                         and (step % config['save_samples_steps'] == 0)):

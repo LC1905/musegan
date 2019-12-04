@@ -11,7 +11,7 @@ class Generator:
         self.n_tracks = n_tracks
         self.name = name
 
-        self.batch_size = 64
+        self.batch_size = 32
         self.latent_dim = 128
 
     def __call__(self, tensor_in, condition=None, training=None, slope=None):

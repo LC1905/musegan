@@ -76,11 +76,14 @@ def sample( batch_num=3, task_per_batch=6, class_per_task=4, sam_per_class=4, va
     test_filename  = [ str(i)+"_test" for i in train_class]
     train_data_list = []
     valid_data_list = []
-    import SharedArray as sa
     # for i in range(NUM_OF_CLASS):
+    
     for i in range(train_class_num):
-        train_data_list.append(sa.attach(train_filename[i]))
-        valid_data_list.append(sa.attach(test_filename[i]))
+        # train_data_list.append(sa.attach(train_filename[i]))
+        # valid_data_list.append(sa.attach(test_filename[i]))
+        train_data_list.append(load_data('npz', 'dataset_meta/' + train_filename[i] + '.npz'))
+        valid_data_list.append(load_data('npz', 'dataset_meta/' + train_filename[i] + '.npz'))
+    
     train_batch = []
     valid_batch = []
     for i in range(batch_num):

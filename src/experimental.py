@@ -5,7 +5,7 @@ from pprint import pformat
 import numpy as np
 import scipy.stats
 import tensorflow as tf
-tf.enable_eager_execution()
+# tf.enable_eager_execution()
 from musegan.config import LOGLEVEL, LOG_FORMAT
 from musegan.data import load_data, get_dataset, get_samples
 from musegan.metrics import get_save_metric_ops
@@ -44,7 +44,7 @@ def load_training_data(params, config):
 def process_maml_data():
     import time
     start_time = time.time()
-    total_meta_batch = 3
+    total_meta_batch = 2
     tasks_per_batch = 6
     classes_per_task = 4
     samples_per_class = 5
@@ -143,5 +143,5 @@ def process_maml_data():
     iterator_val = dataset_val_x.make_initializable_iterator()
     end_time = time.time()
     print('use time: {}'.format(end_time - start_time))
-    return iterator_train.get_next(), iterator_val.get_next()
+    return iterator_train, iterator_val
 

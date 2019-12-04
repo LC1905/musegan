@@ -5,6 +5,7 @@ import argparse
 from pprint import pformat
 import numpy as np
 import scipy.stats
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import tensorflow as tf
 from musegan.config import LOGLEVEL, LOG_FORMAT
 from musegan.data import load_data, get_dataset, get_samples
@@ -161,8 +162,8 @@ def load_or_create_samples(params, config):
 
     return sample_x, None, sample_z
 
+    
 def main():
-
 
     """Main function."""
     # Setup
@@ -174,11 +175,24 @@ def main():
 
     # ================================== Data ==================================
     # Load training data
-    # train_x, _ = load_training_data(params, config)
-    # eval_x, _ = load_training_data(params, config) # must change to EVAL! Only for temp use! 
+    train_x, _ = load_training_data(params, config)
+    eval_x, _ = load_training_data(params, config) # must change to EVAL! Only for temp use! 
     
+    # train_x, eval_x = tf.zeros((32, 4, 48, 84, 5), dtype=tf.dtypes.float32), tf.zeros((32, 4, 48, 84, 5), dtype=tf.dtypes.float32)
+    # print('=' * 50)
+    # print('Train type: {}, train shape: {}'.format(type(train_x), train_x.shape))
     # MAML-format data
-    train_x, eval_x = process_maml_data()
+    # train_x_itr, eval_x_itr = process_maml_data()
+    
+
+    # print('============initialize iterators===========')
+    # with tf.Session() as sess:
+        # sess.run(train_x_itr.initializer)
+        # sess.run(eval_x_itr.initializer)
+
+    # train_x = train_x_itr.get_next()
+    # eval_x = eval_x_itr.get_next()
+    
     
     # ================================= Model ==================================
     # Build MuseGAN model
@@ -236,6 +250,8 @@ def main():
         'labelb':eval_x,
     }
 
+    print('=' * 50)
+    print('input tensors: {}'.format(input_tensors))
     # Test?
     with tf.variable_scope(model.name, reuse=False) as scope:
         ret = model.gen.forward_with_given_weights(weights=weights, 
@@ -250,7 +266,6 @@ def main():
     
     maml_model.construct_model(weights=weights, input_tensors=input_tensors) # should be train_x stuff  
 
-    exit(0) # ends here. 
 
     # for w in weights.keys(): 
     #     print(w)
@@ -270,8 +285,31 @@ def main():
     # if tf_data_load:
     #     model.construct_model(input_tensors=metaval_input_tensors, prefix='metaval_')
     
+    
+    # ================================== MAML Train ==================================
+    maml_iter = 1000
+    resume_iter = 0
 
+    # tf_config = tf.ConfigProto()
+    # tf_config.gpu_options.allow_growth = True
+    
+    # global_step = tf.train.get_global_step()
+    # steps_per_iter = config['n_dis_updates_per_gen_update'] + 1
+    # hooks = [tf.train.NanTensorHook(train_nodes['loss'])]
+    """
+    print('============START MAML TRAINING==============')
+    with tf.train.MonitoredTrainingSession(save_checkpoint_steps=config['save_checkpoint_steps'] * steps_per_iter,
+        save_summaries_steps=config['save_summaries_steps'] * steps_per_iter,
+        checkpoint_dir=config['model_dir'], hooks=hooks, log_step_count_steps=0) as sess:
 
+        sess.run(train_x_itr.initializer)
+        sess.run(eval_x_itr.initializer)
+        for i in range(resume_iter, maml_iter):
+            operations = [maml_model.metatrain_op]
+            result = sess.run(operations)
+            print('result {}: {}'.format(i, result))
+    exit(0)
+    """
     # ================================== MAML end line ==================================
 
     # ================================ Sampler =================================
@@ -332,91 +370,122 @@ def main():
     hooks = [tf.train.NanTensorHook(train_nodes['loss'])]
 
     # Tensor logger
+    """
     tensor_logger = {
         'step': train_nodes['gen_step'],
         'gen_loss': train_nodes['gen_loss'],
         'dis_loss': train_nodes['dis_loss']}
+    """
+    tensor_logger = {
+        'step': train_nodes['gen_step'],
+        'gen_loss_train': maml_model.total_loss1,
+        'gen_loss_val': maml_model.total_losses2[-1]
+    }
     step_logger = open(os.path.join(config['log_dir'], 'step.log'), 'w')
-
     # ======================= Monitored Training Session =======================
+    
     LOGGER.info("Training start.")
+    
+    print('============START MAML TRAINING==============')
+    from tensorflow.core.protobuf import config_pb2
+
+    # print("==================== MuseGAN Training ======================")
     with tf.train.MonitoredTrainingSession(
         save_checkpoint_steps=config['save_checkpoint_steps'] * steps_per_iter,
         save_summaries_steps=config['save_summaries_steps'] * steps_per_iter,
         checkpoint_dir=config['model_dir'], log_step_count_steps=0,
         hooks=hooks, config=tf_config) as sess:
-
         # Get global step value
+        # sess.run(train_x_itr.initializer)
+        # sess.run(val_x_itr.initializer)
         step = tf.train.global_step(sess, global_step)
-        if step == 0:
-            step_logger.write('# step, gen_loss, dis_loss\n')
+        for i in range(resume_iter, maml_iter):
+           
+            print('step: {}'.format(step))
+            if step == 0:
+                step_logger.write('# step, gen_loss, dis_loss\n')
 
-        # ============================== Training ==============================
-        if step >= config['steps']:
-            LOGGER.info("Global step has already exceeded total steps.")
-            step_logger.close()
-            return
+            # ============================== Training ==============================
+            if step >= config['steps']:
+                LOGGER.info("Global step has already exceeded total steps.")
+                step_logger.close()
+                return
 
-        # Training iteration
-        while step < config['steps']:
+            # Training iteration
+            if step < config['steps']:
             
-            ######## WX: Core Traing part begin: MAML would take over here 
-            # 
+                ######## WX: Core Traing part begin: MAML would take over here 
+                # 
 
-            # Train the discriminator
-            if step < 10:
-                n_dis_updates = 10 * config['n_dis_updates_per_gen_update']
-            else:
-                n_dis_updates = config['n_dis_updates_per_gen_update']
-            for _ in range(n_dis_updates):
-                sess.run(train_nodes['train_ops']['dis'])
-
-            # Train the generator
-            log_loss_steps = config['log_loss_steps'] or 100
-            if (step + 1) % log_loss_steps == 0:
-                step, _, tensor_logger_values = sess.run([
-                    train_nodes['gen_step'], train_nodes['train_ops']['gen'],
-                    tensor_logger])
-                # Logger
-                if config['log_loss_steps'] > 0:
-                    LOGGER.info("step={}, {}".format(
-                        tensor_logger_values['step'], ', '.join([
-                            '{}={: 8.4E}'.format(key, value)
-                            for key, value in tensor_logger_values.items()
-                            if key != 'step'])))
-                step_logger.write("{}, {: 10.6E}, {: 10.6E}\n".format(
-                    tensor_logger_values['step'],
-                    tensor_logger_values['gen_loss'],
-                    tensor_logger_values['dis_loss']))
-            else:
-                step, _ = sess.run([
-                    train_nodes['gen_step'], train_nodes['train_ops']['gen']])
-
-            # Run sampler
-            if ((config['save_samples_steps'] > 0)
-                    and (step % config['save_samples_steps'] == 0)):
-                LOGGER.info("Running sampler")
-                feed_dict_sampler = {placeholder_z: sample_z}
-                if params['is_accompaniment']:
-                    feed_dict_sampler[placeholder_c] = np.expand_dims(
-                        sample_x[..., params['condition_track_idx']], -1)
-                if step < 3000:
-                    sess.run(
-                        sampler_op_no_pianoroll, feed_dict=feed_dict_sampler)
+                # Train the discriminator
+                """
+                if step < 10:
+                    n_dis_updates = 10 * config['n_dis_updates_per_gen_update']
                 else:
-                    sess.run(sampler_op, feed_dict=feed_dict_sampler)
+                    n_dis_updates = config['n_dis_updates_per_gen_update']
+                for _ in range(n_dis_updates):
+                    sess.run(train_nodes['train_ops']['dis'])
+                """
+                # Meta train the generator.
+                operations = [maml_model.metatrain_op]
+                # result = sess.run(operations)
+            
+                # Train the generator
+            
+                #log_loss_steps = config['log_loss_steps'] or 100
+                log_loss_steps = 10
+                if (step + 1) % log_loss_steps == 0:
+                    """
+                    step, _, tensor_logger_values = sess.run([
+                        train_nodes['gen_step'], train_nodes['train_ops']['gen'],
+                        tensor_logger])
+                    """ 
+                    _, _, tensor_logger_values = sess.run([train_nodes['gen_step']] + operations + [tensor_logger])
+                    # Logger
+                    if config['log_loss_steps'] > 0:
+                        LOGGER.info("step={}, {}".format(
+                                tensor_logger_values['step'], ', '.join([
+                                '{}={: 8.4E}'.format(key, value)
+                                for key, value in tensor_logger_values.items()
+                                if key != 'step'])))
 
-            # Run evaluation
-            if ((config['evaluate_steps'] > 0)
-                    and (step % config['evaluate_steps'] == 0)):
-                LOGGER.info("Running evaluation")
-                feed_dict_evaluation = {
-                    placeholder_z: scipy.stats.truncnorm.rvs(-2, 2, size=(
-                        np.prod(config['sample_grid']), params['latent_dim']))}
-                if params['is_accompaniment']:
-                    feed_dict_evaluation[placeholder_c] = np.expand_dims(
-                        sample_x[..., params['condition_track_idx']], -1)
-                sess.run(save_metrics_op, feed_dict=feed_dict_evaluation)
+                    step_logger.write("{}, {: 10.6E}, {: 10.6E}\n".format(
+                        #tensor_logger_values['step'],
+                        step,
+                        tensor_logger_values['gen_loss_train'],
+                        tensor_logger_values['gen_loss_val']))
+                else:
+                    _, _ = sess.run([train_nodes['gen_step']] + operations)
+                    # step, _ = sess.run([
+                        # train_nodes['gen_step'], train_nodes['train_ops']['gen']])
+
+                # Run sampler
+                if ((config['save_samples_steps'] > 0)
+                        and (step % config['save_samples_steps'] == 0)):
+                    LOGGER.info("Running sampler")
+                    feed_dict_sampler = {placeholder_z: sample_z}
+                    if params['is_accompaniment']:
+                        feed_dict_sampler[placeholder_c] = np.expand_dims(
+                            sample_x[..., params['condition_track_idx']], -1)
+                    if step < 3000:
+                        sess.run(
+                            sampler_op_no_pianoroll, feed_dict=feed_dict_sampler)
+                    else:
+                        sess.run(sampler_op, feed_dict=feed_dict_sampler)
+
+                # Run evaluation
+                if ((config['evaluate_steps'] > 0)
+                        and (step % config['evaluate_steps'] == 0)):
+                    LOGGER.info("Running evaluation")
+                    feed_dict_evaluation = {
+                        placeholder_z: scipy.stats.truncnorm.rvs(-2, 2, size=(
+                            np.prod(config['sample_grid']), params['latent_dim']))}
+                    if params['is_accompaniment']:
+                        feed_dict_evaluation[placeholder_c] = np.expand_dims(
+                            sample_x[..., params['condition_track_idx']], -1)
+                    sess.run(save_metrics_op, feed_dict=feed_dict_evaluation)
+
+                step += 1
 
             # Stop training if stopping criterion suggests
             if sess.should_stop():
